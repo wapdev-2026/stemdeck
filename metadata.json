@@ -1,0 +1,6 @@
+{
+  "name": "StemDeck",
+  "description": "Load audio stems or Moises ZIP exports, play them in sample-accurate sync with live mute, solo, and gain controls, and export a 16-bit stereo WAV mixdown.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

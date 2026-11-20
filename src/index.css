@@ -1,0 +1,119 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  code, pre, .font-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Hide scrollbars on horizontal touch preset rails while keeping smooth scrolling */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Custom range slider styling for accessible, clean faders and seek bar */
+input[type="range"].stem-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  touch-action: pan-y;
+}
+
+input[type="range"].stem-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 9999px;
+}
+
+input[type="range"].stem-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 18px;
+  width: 18px;
+  border-radius: 9999px;
+  background: currentColor;
+  margin-top: -6px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform 120ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+input[type="range"].stem-slider:hover::-webkit-slider-thumb,
+input[type="range"].stem-slider:active::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+
+input[type="range"].stem-slider::-moz-range-track {
+  height: 6px;
+  border-radius: 9999px;
+}
+
+input[type="range"].stem-slider::-moz-range-thumb {
+  height: 18px;
+  width: 18px;
+  border-radius: 9999px;
+  background: currentColor;
+  border: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform 120ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Larger thumb hitbox on coarse touchscreens (phones/tablets in portrait & landscape) */
+@media (pointer: coarse) {
+  input[type="range"].stem-slider::-webkit-slider-thumb {
+    height: 22px;
+    width: 22px;
+    margin-top: -8px;
+  }
+  input[type="range"].stem-slider::-moz-range-thumb {
+    height: 22px;
+    width: 22px;
+  }
+}
+
+/* Mobile landscape optimization (short viewports rotated horizontally) */
+@media (max-height: 540px) and (orientation: landscape) {
+  .landscape-compact-header {
+    padding-top: 0.375rem !important;
+    padding-bottom: 0.375rem !important;
+  }
+  .landscape-compact-main {
+    padding-top: 0.75rem !important;
+    padding-bottom: 0.75rem !important;
+    gap: 0.75rem !important;
+  }
+  .landscape-compact-strip {
+    flex-direction: row !important;
+    align-items: center !important;
+    padding: 0.625rem 0.75rem !important;
+    gap: 0.875rem !important;
+  }
+  .landscape-compact-controls {
+    width: 17.5rem !important;
+    flex-shrink: 0 !important;
+  }
+  .landscape-compact-waveform {
+    height: 3.25rem !important;
+  }
+}
