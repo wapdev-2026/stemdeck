@@ -9,19 +9,30 @@
 
   html {
     -webkit-tap-highlight-color: transparent;
+    -webkit-text-size-adjust: 100%;
+    overscroll-behavior-y: none;
   }
 
   body {
     font-family: var(--font-sans);
     padding-left: env(safe-area-inset-left, 0px);
     padding-right: env(safe-area-inset-right, 0px);
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    overscroll-behavior-y: none;
   }
 
   code, pre, .font-mono {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
+}
+
+/* Safe area helpers for iPhone Home Indicator & Notch in standalone PWA or Safari */
+.safe-top {
+  padding-top: max(0.5rem, env(safe-area-inset-top, 0px));
+}
+
+.safe-bottom-bar {
+  padding-bottom: max(0.625rem, env(safe-area-inset-bottom, 0px));
 }
 
 /* Hide scrollbars on horizontal touch preset rails while keeping smooth scrolling */
@@ -33,13 +44,13 @@
   scrollbar-width: none;
 }
 
-/* Custom range slider styling for accessible, clean faders and seek bar */
+/* Custom range slider styling for accessible, clean faders and seek bar on iOS & Android */
 input[type="range"].stem-slider {
   -webkit-appearance: none;
   appearance: none;
   background: transparent;
   cursor: pointer;
-  touch-action: pan-y;
+  touch-action: none;
 }
 
 input[type="range"].stem-slider::-webkit-slider-runnable-track {
@@ -79,7 +90,7 @@ input[type="range"].stem-slider::-moz-range-thumb {
   transition: transform 120ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* Larger thumb hitbox on coarse touchscreens (phones/tablets in portrait & landscape) */
+/* Larger thumb hitbox on coarse touchscreens (iPhone/Android in portrait & landscape) */
 @media (pointer: coarse) {
   input[type="range"].stem-slider::-webkit-slider-thumb {
     height: 22px;
@@ -100,7 +111,7 @@ input[type="range"].stem-slider::-moz-range-thumb {
   }
   .landscape-compact-main {
     padding-top: 0.75rem !important;
-    padding-bottom: 0.75rem !important;
+    padding-bottom: 4.5rem !important;
     gap: 0.75rem !important;
   }
   .landscape-compact-strip {

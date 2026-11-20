@@ -16,6 +16,9 @@ export interface AcousticProfile {
   lowEnergyRatio: number;
   midEnergyRatio: number;
   highEnergyRatio: number;
+  spectralCentroidHz: number;
+  stereoWidthRatio: number;
+  activeRatio: number;
 }
 
 export interface StemClassification {
@@ -23,6 +26,8 @@ export interface StemClassification {
   category: StemCategory;
   displayName: string;
   characterNote: string;
+  confidence?: number;
+  source?: 'ai' | 'heuristic' | 'manual';
 }
 
 export interface Stem {
@@ -41,6 +46,7 @@ export interface Stem {
   numberOfChannels: number;
   category?: StemCategory;
   characterNote?: string;
+  classificationSource?: 'ai' | 'heuristic' | 'manual';
   isClassifying?: boolean;
   acousticProfile: AcousticProfile;
 }
@@ -60,4 +66,5 @@ export interface ExportSummary {
   duration: number;
   sampleRate: number;
   timestamp: string;
+  blob?: Blob;
 }

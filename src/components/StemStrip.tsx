@@ -11,6 +11,7 @@ import {
   Piano,
   Radio,
   RotateCcw,
+  Sparkles,
   Trash2,
   Users,
   Volume1,
@@ -18,7 +19,11 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { Stem, StemCategory } from '../types/stem';
-import { formatTime, VOLUME_PRESETS } from '../utils/audioUtils';
+import {
+  ALL_STEM_CATEGORIES,
+  formatTime,
+  VOLUME_PRESETS,
+} from '../utils/audioUtils';
 import { WaveformCanvas } from './WaveformCanvas';
 
 interface StemStripProps {
@@ -32,6 +37,7 @@ interface StemStripProps {
   onToggleMute: (id: string) => void;
   onToggleSolo: (id: string) => void;
   onVolumeChange: (id: string, volume: number) => void;
+  onCategoryChange: (id: string, category: StemCategory) => void;
   onRemove: (id: string) => void;
   onSeek: (newTime: number) => void;
 }
@@ -68,6 +74,7 @@ export const StemStrip: React.FC<StemStripProps> = ({
   onToggleMute,
   onToggleSolo,
   onVolumeChange,
+  onCategoryChange,
   onRemove,
   onSeek,
 }) => {
@@ -141,13 +148,13 @@ export const StemStrip: React.FC<StemStripProps> = ({
             />
           </div>
 
-          {/* Right: Speaker Icon Button (Tap to expand Volume Fader, 10%/15% Presets, Solo & Remove) */}
+          {/* Right: Speaker Icon Button (Tap to expand Volume Fader, 10%/15% Presets, Role & Solo) */}
           <button
             type="button"
             onClick={() => setShowExtras((prev) => !prev)}
             aria-expanded={showExtras}
             aria-label={`Adjust volume and presets for ${stem.name} (${volumePercent}%)`}
-            title={`Tap to adjust volume (${volumePercent}%), presets, or solo`}
+            title={`Tap to adjust volume (${volumePercent}%), presets, role, or solo`}
             style={{
               color: showExtras || effectiveAudible ? stem.color : undefined,
             }}
@@ -172,16 +179,16 @@ export const StemStrip: React.FC<StemStripProps> = ({
           </button>
         </div>
 
-        {/* Collapsible Popover Drawer when Right Speaker Icon is tapped */}
+        {/* Collapsible Popover Drawer when Right Speaker Icon is tapped (Responsive width on iPhone/Android) */}
         {showExtras && (
-          <div className="mx-12 flex flex-col gap-2.5 rounded-2xl border border-slate-200 bg-white/95 p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
+          <div className="mx-1 sm:mx-12 flex flex-col gap-2.5 rounded-2xl border border-slate-200 bg-white/95 p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
             {/* Row 1: M, S, Volume Fader Slider, Percentage readout */}
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => onToggleMute(stem.id)}
                 aria-pressed={stem.muted}
-                className={`flex h-8 px-2.5 shrink-0 items-center justify-center rounded-lg border text-xs font-semibold transition-colors whitespace-nowrap active:scale-95 ${
+                className={`flex h-9 px-3 shrink-0 items-center justify-center rounded-xl border text-xs font-semibold transition-colors whitespace-nowrap active:scale-95 ${
                   stem.muted
                     ? 'border-rose-600 bg-rose-600 text-white'
                     : 'border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200'
@@ -194,7 +201,7 @@ export const StemStrip: React.FC<StemStripProps> = ({
                 type="button"
                 onClick={() => onToggleSolo(stem.id)}
                 aria-pressed={stem.soloed}
-                className={`flex h-8 px-2.5 shrink-0 items-center justify-center rounded-lg border text-xs font-semibold transition-colors whitespace-nowrap active:scale-95 ${
+                className={`flex h-9 px-3 shrink-0 items-center justify-center rounded-xl border text-xs font-semibold transition-colors whitespace-nowrap active:scale-95 ${
                   stem.soloed
                     ? 'border-amber-500 bg-amber-500 text-slate-950'
                     : 'border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200'
@@ -211,7 +218,7 @@ export const StemStrip: React.FC<StemStripProps> = ({
                 value={volumePercent}
                 aria-label={`${stem.name} volume (${volumePercent}%)`}
                 onChange={(e) => onVolumeChange(stem.id, Number(e.target.value) / 100)}
-                className="stem-slider mx-1 h-7 min-w-0 flex-1 rounded-lg bg-slate-200 text-indigo-600 dark:bg-slate-800 dark:text-indigo-400"
+                className="stem-slider mx-1 h-8 min-w-0 flex-1 rounded-lg bg-slate-200 text-indigo-600 dark:bg-slate-800 dark:text-indigo-400"
               />
 
               <span className="w-11 shrink-0 text-right font-mono text-xs font-semibold text-slate-800 dark:text-slate-200">
@@ -219,28 +226,54 @@ export const StemStrip: React.FC<StemStripProps> = ({
               </span>
             </div>
 
-            {/* Row 2: Quick Volume % Preset Buttons (10%, 15%, 25%, 50%, 75%, 100%, 125%, 150%) & Remove */}
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div
-                className="no-scrollbar flex items-center gap-1 overflow-x-auto py-0.5"
-                role="group"
-                aria-label={`Quick volume presets for ${stem.name}`}
-              >
-                {VOLUME_PRESETS.map((preset) => {
-                  const isActive = volumePercent === preset;
+            {/* Row 2: Quick Volume % Preset Buttons (0%, 10%, 15%, 25%, 50%, 75%, 100%, 125%, 150%) */}
+            <div
+              className="no-scrollbar flex items-center gap-1.5 overflow-x-auto py-0.5"
+              role="group"
+              aria-label={`Quick volume presets for ${stem.name}`}
+            >
+              {VOLUME_PRESETS.map((preset) => {
+                const isActive = volumePercent === preset;
+                return (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => onVolumeChange(stem.id, preset / 100)}
+                    aria-pressed={isActive}
+                    className={`min-h-[34px] rounded-xl px-2.5 py-1 font-mono text-xs font-medium transition-colors whitespace-nowrap shrink-0 active:scale-95 ${
+                      isActive
+                        ? 'bg-indigo-600 text-white dark:bg-indigo-500'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700'
+                    }`}
+                  >
+                    {preset}%
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Row 3: Role Switcher Pills (AI verified or one-tap override) & Remove */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-2 dark:border-slate-800/80">
+              <div className="no-scrollbar flex items-center gap-1 overflow-x-auto py-0.5">
+                <span className="mr-1 inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 dark:text-slate-500 whitespace-nowrap shrink-0">
+                  <Sparkles className="h-3 w-3 text-indigo-400" />
+                  <span>Role:</span>
+                </span>
+                {ALL_STEM_CATEGORIES.map((cat) => {
+                  const isCurrent = stem.category === cat;
                   return (
                     <button
-                      key={preset}
+                      key={cat}
                       type="button"
-                      onClick={() => onVolumeChange(stem.id, preset / 100)}
-                      aria-pressed={isActive}
-                      className={`min-h-[30px] rounded-lg px-2 py-1 font-mono text-xs font-medium transition-colors whitespace-nowrap shrink-0 active:scale-95 ${
-                        isActive
-                          ? 'bg-indigo-600 text-white dark:bg-indigo-500'
-                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700'
+                      onClick={() => onCategoryChange(stem.id, cat)}
+                      aria-pressed={isCurrent}
+                      className={`min-h-[30px] rounded-lg px-2 py-0.5 text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 active:scale-95 ${
+                        isCurrent
+                          ? 'bg-slate-900 text-white dark:bg-amber-400 dark:text-slate-950'
+                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300'
                       }`}
                     >
-                      {preset}%
+                      {cat === 'Background' ? 'B.Vocals' : cat}
                     </button>
                   );
                 })}
@@ -250,7 +283,7 @@ export const StemStrip: React.FC<StemStripProps> = ({
                 type="button"
                 onClick={() => onRemove(stem.id)}
                 aria-label={`Remove ${stem.name}`}
-                className="inline-flex h-7 items-center gap-1 rounded-lg px-2 text-xs font-medium text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/50"
+                className="inline-flex h-8 items-center gap-1 rounded-lg px-2.5 text-xs font-medium text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/50 shrink-0"
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 <span>Remove</span>
@@ -384,7 +417,7 @@ export const StemStrip: React.FC<StemStripProps> = ({
       </div>
 
       {showExtras && (
-        <div className="flex flex-col gap-2.5 border-t border-slate-100 pt-2.5 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800/80">
+        <div className="flex flex-col gap-2.5 border-t border-slate-100 pt-2.5 dark:border-slate-800/80">
           <div
             className="no-scrollbar flex items-center gap-1.5 overflow-x-auto py-0.5"
             role="group"
@@ -413,13 +446,29 @@ export const StemStrip: React.FC<StemStripProps> = ({
             })}
           </div>
 
-          <div className="flex items-center justify-between gap-2 sm:justify-end">
-            <div className="flex min-w-0 items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-              {stem.characterNote && (
-                <span className="truncate max-w-[180px]" title={stem.characterNote}>
-                  {stem.characterNote}
-                </span>
-              )}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="no-scrollbar flex items-center gap-1 overflow-x-auto py-0.5">
+              <span className="mr-1 text-[11px] font-medium text-slate-400 dark:text-slate-500 whitespace-nowrap shrink-0">
+                Role:
+              </span>
+              {ALL_STEM_CATEGORIES.map((cat) => {
+                const isCurrent = stem.category === cat;
+                return (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => onCategoryChange(stem.id, cat)}
+                    aria-pressed={isCurrent}
+                    className={`min-h-[28px] rounded-lg px-2 py-0.5 text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 active:scale-95 ${
+                      isCurrent
+                        ? 'bg-slate-900 text-white dark:bg-amber-400 dark:text-slate-950'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300'
+                    }`}
+                  >
+                    {cat === 'Background' ? 'B.Vocals' : cat}
+                  </button>
+                );
+              })}
             </div>
 
             <div className="flex items-center gap-1.5 shrink-0">

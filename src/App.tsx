@@ -11,10 +11,10 @@ import {
   Play,
   Plus,
   RotateCcw,
+  Share2,
   Sliders,
   Square,
   Sun,
-  Trash2,
   Upload,
   Volume2,
   VolumeX,
@@ -26,18 +26,24 @@ import { StemStrip } from './components/StemStrip';
 import { ExportSummary, ImportError, Stem, StemCategory } from './types/stem';
 import {
   buildMixdownFilename,
+  canShareAudioFile,
   CATEGORY_COLORS,
+  classifyStemLocally,
   classifyStemsWithAI,
   computeAcousticProfile,
   computePeaks,
   createDemoStems,
+  decodeAudioBufferSafely,
   exportMixdownWav,
   extractAudioCandidates,
   formatTime,
   getEffectiveStemGain,
   isStemAudible,
+  shareAudioBlob,
   STEM_COLORS,
   stripExtension,
+  triggerBlobDownload,
+  unlockMobileAudioContext,
   VOLUME_PRESETS,
 } from './utils/audioUtils';
 
@@ -52,20 +58,45 @@ const VALID_CATEGORIES: StemCategory[] = [
   'Other',
 ];
 
+const CATEGORY_DEFAULT_LABELS: Record<StemCategory, string> = {
+  Vocals: 'Vocals',
+  Background: 'Background Vocals',
+  Drums: 'Drums',
+  Bass: 'Bass',
+  Guitar: 'Guitar',
+  Keys: 'Keys',
+  Synth: 'Synth',
+  Other: 'Other',
+};
+
 function normalizeCategory(raw?: string): StemCategory {
   if (!raw) return 'Other';
   const match = VALID_CATEGORIES.find((c) => c.toLowerCase() === raw.trim().toLowerCase());
   if (match) return match;
   const lower = raw.toLowerCase();
-  if (lower.includes('back') || lower.includes('bgv') || lower.includes('choir') || lower.includes('harmon')) {
+  if (
+    lower.includes('back') ||
+    lower.includes('bgv') ||
+    lower.includes('choir') ||
+    lower.includes('harmon') ||
+    lower.includes('coro')
+  ) {
     return 'Background';
   }
-  if (lower.includes('voc') || lower.includes('voice') || lower.includes('lead')) return 'Vocals';
-  if (lower.includes('drum') || lower.includes('perc') || lower.includes('beat')) return 'Drums';
-  if (lower.includes('bass')) return 'Bass';
-  if (lower.includes('guit')) return 'Guitar';
-  if (lower.includes('key') || lower.includes('pian') || lower.includes('organ')) return 'Keys';
-  if (lower.includes('synth') || lower.includes('string') || lower.includes('pad')) return 'Synth';
+  if (lower.includes('voc') || lower.includes('voice') || lower.includes('lead') || lower.includes('voz')) {
+    return 'Vocals';
+  }
+  if (lower.includes('drum') || lower.includes('perc') || lower.includes('beat') || lower.includes('bateria')) {
+    return 'Drums';
+  }
+  if (lower.includes('bass') || lower.includes('bajo') || lower.includes('baixo')) return 'Bass';
+  if (lower.includes('guit') || lower.includes('gtr')) return 'Guitar';
+  if (lower.includes('key') || lower.includes('pian') || lower.includes('organ') || lower.includes('rhodes')) {
+    return 'Keys';
+  }
+  if (lower.includes('synth') || lower.includes('string') || lower.includes('pad') || lower.includes('brass')) {
+    return 'Synth';
+  }
   return 'Other';
 }
 
@@ -82,6 +113,7 @@ export default function App() {
   const [isExporting, setIsExporting] = useState(false);
   const [exportSummary, setExportSummary] = useState<ExportSummary | null>(null);
   const [activeTab, setActiveTab] = useState<'deck' | 'mixer' | 'tools'>('deck');
+  const [supportsNativeShare, setSupportsNativeShare] = useState(false);
   const [isDark, setIsDark] = useState<boolean>(() =>
     typeof document !== 'undefined' ? document.documentElement.classList.contains('dark') : true
   );
@@ -99,6 +131,10 @@ export default function App() {
 
   stemsRef.current = stems;
   isPlayingRef.current = isPlaying;
+
+  useEffect(() => {
+    setSupportsNativeShare(canShareAudioFile());
+  }, []);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -146,6 +182,21 @@ export default function App() {
     return audioCtxRef.current;
   }, []);
 
+  // Unlock iOS / Android AudioContext on first user touch anywhere in the app
+  useEffect(() => {
+    const handleFirstTouch = () => {
+      if (audioCtxRef.current) {
+        void unlockMobileAudioContext(audioCtxRef.current);
+      }
+    };
+    window.addEventListener('touchstart', handleFirstTouch, { passive: true, once: true });
+    window.addEventListener('click', handleFirstTouch, { passive: true, once: true });
+    return () => {
+      window.removeEventListener('touchstart', handleFirstTouch);
+      window.removeEventListener('click', handleFirstTouch);
+    };
+  }, []);
+
   const stopActiveNodes = useCallback(() => {
     activeSourcesRef.current.forEach((source) => {
       try {
@@ -186,8 +237,8 @@ export default function App() {
   }, [stopActiveNodes]);
 
   /**
-   * Runs Gemini AI stem recognition on the provided stems and updates their display names,
-   * categories (Vocals, Background, Drums, Bass, Guitar, Keys, Synth, Other), notes, and colors.
+   * Runs resilient Gemini AI stem recognition (with automatic acoustic+lexical fallback)
+   * on the provided stems and updates their display names, categories, notes, and colors.
    */
   const runAiClassification = useCallback(async (targetStems: Stem[]) => {
     if (targetStems.length === 0) return;
@@ -205,6 +256,10 @@ export default function App() {
       setStems((prev) =>
         prev.map((stem) => {
           if (!targetIds.has(stem.id)) return stem;
+          // Preserve manual overrides if the user already tapped a role pill while AI was in flight
+          if (stem.classificationSource === 'manual') {
+            return { ...stem, isClassifying: false };
+          }
           const matched = byId.get(stem.id);
           if (!matched) {
             return { ...stem, isClassifying: false };
@@ -216,21 +271,14 @@ export default function App() {
             category,
             characterNote: matched.characterNote?.trim() || stem.characterNote,
             color: CATEGORY_COLORS[category] || stem.color,
+            classificationSource: matched.source || 'ai',
             isClassifying: false,
           };
         })
       );
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Failed to classify stems with AI.';
-      setErrors((prev) => [
-        {
-          id: `ai-err-${Date.now()}`,
-          fileName: 'AI Stem Recognition',
-          message: `AI Stem Recognition error: ${message}`,
-        },
-        ...prev,
-      ]);
+    } catch {
+      // classifyStemsWithAI already falls back to local acoustic classification,
+      // so we simply clear the loading spinner without showing intrusive errors
       setStems((prev) =>
         prev.map((s) => (targetIds.has(s.id) ? { ...s, isClassifying: false } : s))
       );
@@ -248,9 +296,7 @@ export default function App() {
       if (currentStems.length === 0) return;
 
       const ctx = getOrCreateAudioContext();
-      if (ctx.state === 'suspended') {
-        await ctx.resume();
-      }
+      await unlockMobileAudioContext(ctx);
 
       stopActiveNodes();
 
@@ -289,6 +335,16 @@ export default function App() {
 
       const updatePlayhead = () => {
         if (!isPlayingRef.current || !audioCtxRef.current) return;
+
+        // If iOS interrupts AudioContext (e.g. incoming phone call or Siri), pause cleanly
+        const ctxState = audioCtxRef.current.state as string;
+        if (ctxState === 'interrupted' || ctxState === 'suspended') {
+          stopActiveNodes();
+          setIsPlaying(false);
+          isPlayingRef.current = false;
+          return;
+        }
+
         const elapsed = audioCtxRef.current.currentTime - playbackStartCtxTimeRef.current;
         const latestStems = stemsRef.current;
         const latestMaxDur =
@@ -349,6 +405,46 @@ export default function App() {
     [startPlaybackAt]
   );
 
+  // MediaSession API integration for iPhone Lock Screen / Control Center & Android Notification Shade
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+    try {
+      if (stems.length > 0) {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: sessionTitle,
+          artist: `StemDeck (${audibleStemCount}/${stems.length} Stems)`,
+          album: 'StemDeck Multitrack Mixer',
+        });
+      }
+      navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+      navigator.mediaSession.setActionHandler('play', () => {
+        void startPlaybackAt(pauseOffsetRef.current);
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        pausePlayback();
+      });
+      navigator.mediaSession.setActionHandler('stop', () => {
+        stopPlayback();
+      });
+      navigator.mediaSession.setActionHandler('seekto', (details) => {
+        if (typeof details.seekTime === 'number') {
+          handleSeek(details.seekTime);
+        }
+      });
+    } catch {
+      // Ignore on browsers with partial MediaSession support
+    }
+  }, [
+    stems.length,
+    audibleStemCount,
+    sessionTitle,
+    isPlaying,
+    startPlaybackAt,
+    pausePlayback,
+    stopPlayback,
+    handleSeek,
+  ]);
+
   /**
    * Live GainNode updates via setTargetAtTime whenever mute, solo, or volume state changes.
    */
@@ -404,8 +500,8 @@ export default function App() {
   }, [stopActiveNodes]);
 
   /**
-   * Imports audio files and/or .zip archives, decodes with AudioContext.decodeAudioData,
-   * appends stems to the session, and automatically runs Gemini AI stem identification.
+   * Imports audio files and/or .zip archives, decodes with decodeAudioBufferSafely,
+   * applies instant acoustic+lexical stem recognition, and refines with Gemini AI.
    */
   const handleFilesAdded = useCallback(
     async (fileList: FileList | File[]) => {
@@ -425,21 +521,34 @@ export default function App() {
         const newErrors: ImportError[] = [...extractionErrors];
         const decodedStems: Stem[] = [];
         const ctx = getOrCreateAudioContext();
+        await unlockMobileAudioContext(ctx);
         const baseColorOffset = stemsRef.current.length;
 
         for (let i = 0; i < candidates.length; i++) {
           const candidate = candidates[i];
           setLoadingStatus(`Decoding ${candidate.stemName} (${i + 1} of ${candidates.length})...`);
 
+          // Yield briefly to keep iOS Safari / Android Chrome UI responsive during multi-stem decoding
+          await new Promise((r) => setTimeout(r, 0));
+
           try {
             const arrayBuffer = await candidate.getArrayBuffer();
-            const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+            const audioBuffer = await decodeAudioBufferSafely(ctx, arrayBuffer);
             const peaks = computePeaks(audioBuffer, 480);
             const acousticProfile = computeAcousticProfile(audioBuffer);
+            const stemId = `stem-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}`;
+
+            // Instant local acoustic + filename classification (0ms latency, works offline)
+            const initialMatch = classifyStemLocally(
+              stemId,
+              candidate.stemName,
+              candidate.fileName,
+              acousticProfile
+            );
 
             decodedStems.push({
-              id: `stem-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}`,
-              name: candidate.stemName,
+              id: stemId,
+              name: initialMatch.displayName,
               rawName: candidate.stemName,
               fileName: candidate.fileName,
               buffer: audioBuffer,
@@ -447,10 +556,15 @@ export default function App() {
               volume: 1.0,
               muted: false,
               soloed: false,
-              color: STEM_COLORS[(baseColorOffset + decodedStems.length) % STEM_COLORS.length],
+              color:
+                CATEGORY_COLORS[initialMatch.category] ||
+                STEM_COLORS[(baseColorOffset + decodedStems.length) % STEM_COLORS.length],
               duration: audioBuffer.duration,
               sampleRate: audioBuffer.sampleRate,
               numberOfChannels: audioBuffer.numberOfChannels,
+              category: initialMatch.category,
+              characterNote: initialMatch.characterNote,
+              classificationSource: 'heuristic',
               isClassifying: true,
               acousticProfile,
             });
@@ -458,7 +572,7 @@ export default function App() {
             newErrors.push({
               id: `${Date.now()}-${i}-${Math.random()}`,
               fileName: candidate.fileName,
-              message: `Could not decode ${candidate.fileName}. Use MP3, WAV, M4A, FLAC or OGG.`,
+              message: `Could not decode ${candidate.fileName}. Use MP3, WAV, M4A, AAC, FLAC or OGG.`,
             });
           }
         }
@@ -482,12 +596,13 @@ export default function App() {
     [getOrCreateAudioContext, pausePlayback, runAiClassification]
   );
 
-  const handleLoadDemoStems = useCallback(() => {
+  const handleLoadDemoStems = useCallback(async () => {
     if (isPlayingRef.current) {
       pausePlayback();
     }
     setExportSummary(null);
     const ctx = getOrCreateAudioContext();
+    await unlockMobileAudioContext(ctx);
     const demoStems = createDemoStems(ctx, stemsRef.current.length);
     setStems((prev) => [...prev, ...demoStems]);
     void runAiClassification(demoStems);
@@ -517,6 +632,23 @@ export default function App() {
     const clamped = Math.max(0, Math.min(1.5, volume));
     setStems((prev) =>
       prev.map((stem) => (stem.id === id ? { ...stem, volume: clamped } : stem))
+    );
+  }, []);
+
+  const handleCategoryChange = useCallback((id: string, category: StemCategory) => {
+    setStems((prev) =>
+      prev.map((stem) =>
+        stem.id === id
+          ? {
+              ...stem,
+              category,
+              name: CATEGORY_DEFAULT_LABELS[category] || category,
+              color: CATEGORY_COLORS[category] || stem.color,
+              classificationSource: 'manual',
+              isClassifying: false,
+            }
+          : stem
+      )
     );
   }, []);
 
@@ -586,15 +718,7 @@ export default function App() {
     try {
       const { blob, summary } = await exportMixdownWav(stems, preventClipping);
       setExportSummary(summary);
-
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = summary.fileName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      triggerBlobDownload(blob, summary.fileName);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error during offline rendering.';
       setErrors((prev) => [
@@ -609,6 +733,11 @@ export default function App() {
       setIsExporting(false);
     }
   }, [stems, preventClipping, isExporting, liveExportFileName]);
+
+  const handleNativeShareMixdown = useCallback(async () => {
+    if (!exportSummary?.blob) return;
+    await shareAudioBlob(exportSummary.blob, exportSummary.fileName);
+  }, [exportSummary]);
 
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -637,16 +766,16 @@ export default function App() {
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      className="min-h-screen flex flex-col bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors"
+      className="min-h-dvh flex flex-col bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors"
     >
       <OfflineIndicator />
 
-      {/* Hidden multi-file picker */}
+      {/* Hidden multi-file picker optimized for iPhone (iOS Files / iCloud) & Android (Downloads / Drive) */}
       <input
         ref={fileInputRef}
         type="file"
         multiple
-        accept=".mp3,.wav,.m4a,.flac,.ogg,.zip,audio/*,application/zip"
+        accept="audio/*,application/zip,application/x-zip-compressed,multipart/x-zip,.zip,.mp3,.wav,.m4a,.aac,.flac,.ogg,.aiff,.aif,.caf,.webm,.mp4"
         onChange={(e) => {
           if (e.target.files && e.target.files.length > 0) {
             void handleFilesAdded(e.target.files);
@@ -665,14 +794,14 @@ export default function App() {
               Drop audio stems or a .zip archive
             </p>
             <p className="text-sm text-slate-600 dark:text-slate-400">
-              Supports MP3, WAV, M4A, FLAC, OGG, and ZIP files
+              Supports MP3, WAV, M4A, AAC, FLAC, OGG, and ZIP files
             </p>
           </div>
         </div>
       )}
 
       {/* Top Bar Contract: 3 zones */}
-      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur-md dark:border-slate-800 dark:bg-slate-950/90">
+      <header className="safe-top sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur-md dark:border-slate-800 dark:bg-slate-950/90">
         <div className="landscape-compact-header mx-auto flex max-w-5xl items-center justify-between gap-4 px-3.5 py-2 sm:px-6 sm:py-3">
           {/* Zone 1: Brand Title */}
           <a
@@ -770,46 +899,75 @@ export default function App() {
           </div>
         )}
 
-        {/* Export Mixdown Feedback Banner */}
+        {/* Export Mixdown Feedback Banner with Native Mobile Share / Save to Files */}
         {exportSummary && (
           <div
             role="status"
-            className="flex items-start justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50/90 px-3.5 py-2.5 text-xs sm:text-sm text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-200"
+            className="flex flex-col gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50/90 px-3.5 py-3 text-xs sm:text-sm text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-200"
           >
-            <div className="flex items-start gap-2">
-              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-              <div className="space-y-0.5">
-                <p className="font-semibold break-all">
-                  Exported <span className="font-mono">{exportSummary.fileName}</span> (16-bit Stereo PCM ·{' '}
-                  {exportSummary.sampleRate} Hz · {formatTime(exportSummary.duration)})
-                </p>
-                {exportSummary.preventClippingApplied ? (
-                  <p className="text-xs text-emerald-800 dark:text-emerald-300">
-                    Peak level exceeded 0 dBFS ({exportSummary.originalPeak.toFixed(2)} linear peak).
-                    Scaled the entire mix down to 0.98 (−{exportSummary.dbRemoved.toFixed(2)} dB
-                    removed) to prevent clipping.
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-start gap-2">
+                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                <div className="space-y-0.5">
+                  <p className="font-semibold break-all">
+                    Exported <span className="font-mono">{exportSummary.fileName}</span> (16-bit Stereo PCM ·{' '}
+                    {exportSummary.sampleRate} Hz · {formatTime(exportSummary.duration)})
                   </p>
-                ) : exportSummary.clipped ? (
-                  <p className="text-xs text-amber-700 dark:text-amber-300">
-                    Peak level reached {exportSummary.originalPeak.toFixed(2)} (exceeded 1.0) and was
-                    hard-clamped because &ldquo;Prevent clipping&rdquo; was turned off.
-                  </p>
-                ) : (
-                  <p className="text-xs text-emerald-800 dark:text-emerald-300">
-                    Peak level was {(exportSummary.originalPeak * 100).toFixed(1)}% of full scale (no
-                    gain reduction needed).
-                  </p>
+                  {exportSummary.preventClippingApplied ? (
+                    <p className="text-xs text-emerald-800 dark:text-emerald-300">
+                      Peak level exceeded 0 dBFS ({exportSummary.originalPeak.toFixed(2)} linear peak).
+                      Scaled the entire mix down to 0.98 (−{exportSummary.dbRemoved.toFixed(2)} dB
+                      removed) to prevent clipping.
+                    </p>
+                  ) : exportSummary.clipped ? (
+                    <p className="text-xs text-amber-700 dark:text-amber-300">
+                      Peak level reached {exportSummary.originalPeak.toFixed(2)} (exceeded 1.0) and was
+                      hard-clamped because &ldquo;Prevent clipping&rdquo; was turned off.
+                    </p>
+                  ) : (
+                    <p className="text-xs text-emerald-800 dark:text-emerald-300">
+                      Peak level was {(exportSummary.originalPeak * 100).toFixed(1)}% of full scale (no
+                      gain reduction needed).
+                    </p>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setExportSummary(null)}
+                aria-label="Dismiss export summary"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-emerald-700 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 dark:text-emerald-400 dark:hover:bg-emerald-900/50"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {exportSummary.blob && (
+              <div className="flex flex-wrap items-center gap-2 pl-6">
+                <button
+                  type="button"
+                  onClick={() =>
+                    exportSummary.blob &&
+                    triggerBlobDownload(exportSummary.blob, exportSummary.fileName)
+                  }
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-2.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 active:scale-95 dark:border-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-200"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  <span>Download WAV Again</span>
+                </button>
+
+                {supportsNativeShare && (
+                  <button
+                    type="button"
+                    onClick={() => void handleNativeShareMixdown()}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-emerald-600 px-3 text-xs font-semibold text-white hover:bg-emerald-500 active:scale-95"
+                  >
+                    <Share2 className="h-3.5 w-3.5" />
+                    <span>Share / Save to Files</span>
+                  </button>
                 )}
               </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setExportSummary(null)}
-              aria-label="Dismiss export summary"
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-emerald-700 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 dark:text-emerald-400 dark:hover:bg-emerald-900/50"
-            >
-              <X className="h-4 w-4" />
-            </button>
+            )}
           </div>
         )}
 
@@ -839,7 +997,7 @@ export default function App() {
 
               <button
                 type="button"
-                onClick={handleExportMixdown}
+                onClick={() => void handleExportMixdown()}
                 disabled={isExporting || audibleStemCount === 0}
                 aria-label="Export mixdown (WAV)"
                 title={`Export mixdown as ${liveExportFileName}`}
@@ -854,7 +1012,7 @@ export default function App() {
               </button>
             </div>
 
-            {/* Mode Switcher Tabs: [Stems (Deck)]  [Faders (Mixer)]  [Mix Tools] */}
+            {/* Mode Switcher Tabs: [Stems (Deck)]  [Faders (Mixer)]  [Presets & AI] */}
             <div
               role="tablist"
               aria-label="Mixer view mode"
@@ -953,7 +1111,7 @@ export default function App() {
                   ) : (
                     <>
                       <Wand2 className="h-3.5 w-3.5" />
-                      <span>Identify Stems with AI</span>
+                      <span>Re-Analyze Stems with AI</span>
                     </>
                   )}
                 </button>
@@ -1011,7 +1169,7 @@ export default function App() {
 
                 <button
                   type="button"
-                  onClick={handleExportMixdown}
+                  onClick={() => void handleExportMixdown()}
                   disabled={isExporting || audibleStemCount === 0}
                   className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-slate-900 px-3.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900"
                 >
@@ -1051,6 +1209,7 @@ export default function App() {
                   onToggleMute={handleToggleMute}
                   onToggleSolo={handleToggleSolo}
                   onVolumeChange={handleVolumeChange}
+                  onCategoryChange={handleCategoryChange}
                   onRemove={handleRemoveStem}
                   onSeek={handleSeek}
                 />
@@ -1108,7 +1267,7 @@ export default function App() {
               </h1>
 
               <p className="mt-2 max-w-lg text-sm leading-relaxed text-slate-600 dark:text-slate-400">
-                Drag and drop multiple audio files or a{' '}
+                Select or drop multiple audio files or a{' '}
                 <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-800 dark:bg-slate-800 dark:text-slate-200">
                   .zip
                 </code>{' '}
@@ -1128,7 +1287,7 @@ export default function App() {
 
                 <button
                   type="button"
-                  onClick={handleLoadDemoStems}
+                  onClick={() => void handleLoadDemoStems()}
                   disabled={isLoadingFiles}
                   className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 active:scale-98 disabled:opacity-50 whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
                 >
@@ -1138,22 +1297,22 @@ export default function App() {
               </div>
 
               <div className="mt-6 sm:mt-8 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                <span>MP3, WAV, M4A, FLAC, OGG, ZIP</span>
+                <span>MP3, WAV, M4A, AAC, FLAC, OGG, ZIP</span>
                 <span aria-hidden="true">·</span>
                 <span>AI Stem Recognition</span>
                 <span aria-hidden="true">·</span>
-                <span>16-bit WAV Export</span>
+                <span>iPhone &amp; Android Ready</span>
               </div>
             </div>
           </section>
         )}
       </main>
 
-      {/* Bottom Transport Scrubber Bar (Anchored in the natural thumb zone, matching the reference view) */}
+      {/* Bottom Transport Scrubber Bar (Anchored in the natural thumb zone with iPhone Home Indicator safe-area) */}
       {stems.length > 0 && (
         <footer
           aria-label="Playback transport bar"
-          className="fixed bottom-0 left-0 right-0 z-30 border-t border-slate-200/80 bg-white/95 px-4 py-2.5 backdrop-blur-md dark:border-slate-800/80 dark:bg-slate-950/95"
+          className="safe-bottom-bar fixed bottom-0 left-0 right-0 z-30 border-t border-slate-200/80 bg-white/95 px-4 pt-2.5 backdrop-blur-md dark:border-slate-800/80 dark:bg-slate-950/95"
         >
           <div className="mx-auto flex max-w-4xl items-center gap-3">
             {/* Play / Pause Button */}
@@ -1182,7 +1341,7 @@ export default function App() {
               <Square className="h-3.5 w-3.5 fill-current" />
             </button>
 
-            {/* Warm Gold / Orange Master Scrubber Bar (Like the bottom scrubber in the reference photo) */}
+            {/* Warm Gold / Orange Master Scrubber Bar */}
             <div className="flex flex-1 items-center gap-2.5">
               <span className="w-11 shrink-0 text-right font-mono text-xs font-medium text-slate-700 dark:text-amber-400">
                 {formatTime(currentTime)}
