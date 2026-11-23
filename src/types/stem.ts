@@ -27,7 +27,7 @@ export interface StemClassification {
   displayName: string;
   characterNote: string;
   confidence?: number;
-  source?: 'ai' | 'heuristic' | 'manual';
+  source?: 'ai' | 'heuristic' | 'manual' | 'filename';
 }
 
 export interface Stem {
@@ -46,7 +46,7 @@ export interface Stem {
   numberOfChannels: number;
   category?: StemCategory;
   characterNote?: string;
-  classificationSource?: 'ai' | 'heuristic' | 'manual';
+  classificationSource?: 'ai' | 'heuristic' | 'manual' | 'filename';
   isClassifying?: boolean;
   acousticProfile: AcousticProfile;
 }

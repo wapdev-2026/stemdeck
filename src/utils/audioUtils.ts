@@ -20,6 +20,8 @@ export const SUPPORTED_AUDIO_EXTENSIONS = [
   'caf',
   'webm',
   'mp4',
+  'm4r',
+  '3gp',
 ];
 
 export const STEM_COLORS = [
@@ -58,19 +60,23 @@ export const ALL_STEM_CATEGORIES: StemCategory[] = [
 export const VOLUME_PRESETS = [0, 10, 15, 25, 50, 75, 100, 125, 150];
 
 export function getExtension(filename: string): string {
-  const parts = filename.toLowerCase().split('.');
+  const parts = (filename || '').toLowerCase().split('.');
   return parts.length > 1 ? parts[parts.length - 1] : '';
 }
 
 export function isSupportedAudioFile(filename: string, mimeType = ''): boolean {
   const ext = getExtension(filename);
   if (SUPPORTED_AUDIO_EXTENSIONS.includes(ext)) return true;
-  if (mimeType && mimeType.toLowerCase().startsWith('audio/')) return true;
+  if (mimeType && mimeType.toLowerCase().includes('audio')) return true;
+  if (!mimeType || mimeType === 'application/octet-stream') {
+    // On iOS Safari, files from iCloud/Files often have empty or octet-stream MIME types
+    return true;
+  }
   return false;
 }
 
 export function stripExtension(filepath: string): string {
-  const normalized = filepath.replace(/\\/g, '/');
+  const normalized = (filepath || '').replace(/\\/g, '/');
   const base = normalized.split('/').pop() || filepath;
   const lastDot = base.lastIndexOf('.');
   if (lastDot <= 0) return base;
@@ -84,15 +90,11 @@ export function isIgnoredZipEntry(entryPath: string, isDir: boolean): boolean {
   const segments = normalized.split('/');
   const base = segments[segments.length - 1];
   if (!base || base.startsWith('.') || base.startsWith('._')) return true;
-  return !isSupportedAudioFile(base);
+  return false; // Accept all non-hidden files inside zip archives
 }
 
 /**
- * Unlocks Web Audio output on iOS Safari (iPhone/iPad) and Android Chrome.
- * - Sets navigator.audioSession.type = 'playback' on iOS 16.4+ so audio plays even when the
- *   iPhone hardware Ring/Silent switch is muted.
- * - Resumes 'suspended' or iOS 'interrupted' AudioContext states.
- * - Plays a 1-sample silent buffer to satisfy WebKit user-gesture audio unlock.
+ * Robust iOS Safari / Android Chrome audio unlock helper.
  */
 export async function unlockMobileAudioContext(ctx: AudioContext): Promise<void> {
   try {
@@ -103,7 +105,7 @@ export async function unlockMobileAudioContext(ctx: AudioContext): Promise<void>
       nav.audioSession.type = 'playback';
     }
   } catch {
-    // Ignore on browsers that do not implement navigator.audioSession
+    // Ignore
   }
 
   try {
@@ -124,6 +126,36 @@ export async function unlockMobileAudioContext(ctx: AudioContext): Promise<void>
   } catch {
     // Ignore
   }
+}
+
+/**
+ * Robust file arrayBuffer reader with fallback for older iOS Safari versions.
+ */
+export async function readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
+  if (typeof file.arrayBuffer === 'function') {
+    try {
+      const buf = await file.arrayBuffer();
+      return buf;
+    } catch {
+      // Fall through to FileReader
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const res = reader.result;
+      if (res instanceof ArrayBuffer) {
+        resolve(res);
+      } else if (res && typeof res === 'object' && 'byteLength' in res) {
+        resolve(res as unknown as ArrayBuffer);
+      } else {
+        reject(new Error('Failed to read file as ArrayBuffer'));
+      }
+    };
+    reader.onerror = () => reject(reader.error || new Error('FileReader error'));
+    reader.readAsArrayBuffer(file);
+  });
 }
 
 /**
@@ -151,9 +183,6 @@ export function decodeAudioBufferSafely(
   });
 }
 
-/**
- * Computes normalized peak values [0..1] across the full duration of an AudioBuffer.
- */
 export function computePeaks(buffer: AudioBuffer, bucketCount = 480): number[] {
   const channels = buffer.numberOfChannels;
   const length = buffer.length;
@@ -199,11 +228,6 @@ export function computePeaks(buffer: AudioBuffer, bucketCount = 480): number[] {
   return peaks;
 }
 
-/**
- * Computes an enhanced acoustic DSP profile (RMS, peak, transient crest factor, ZCR,
- * 3-band spectral ratios, estimated spectral centroid, stereo width ratio, and active duty cycle)
- * from an AudioBuffer to power both instant local recognition and Gemini AI stem classification.
- */
 export function computeAcousticProfile(buffer: AudioBuffer): AcousticProfile {
   const ch0 = buffer.getChannelData(0);
   const ch1 = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : null;
@@ -234,7 +258,6 @@ export function computeAcousticProfile(buffer: AudioBuffer): AcousticProfile {
   let midEnergySum = 0;
   let sideEnergySum = 0;
 
-  // 1-pole low-pass and band-split filter state to estimate low (<250Hz), mid (250-2500Hz), high (>2500Hz)
   let lowState = 0;
   let midLowState = 0;
   const effectiveSr = sr / stride;
@@ -290,7 +313,6 @@ export function computeAcousticProfile(buffer: AudioBuffer): AcousticProfile {
   const midRatio = midEnergy / totalBandEnergy;
   const highRatio = highEnergy / totalBandEnergy;
 
-  // Approximate spectral centroid from band ratios + ZCR
   const spectralCentroidHz = Math.round(
     lowRatio * 140 + midRatio * 1150 + highRatio * 4800
   );
@@ -314,10 +336,6 @@ export function computeAcousticProfile(buffer: AudioBuffer): AcousticProfile {
   };
 }
 
-/**
- * Instant, deterministic local stem classifier (0ms latency, works 100% offline on iPhone & Android).
- * Combines multi-language filename token matching with DSP acoustic profile inference.
- */
 export function classifyStemLocally(
   id: string,
   rawName: string,
@@ -326,7 +344,22 @@ export function classifyStemLocally(
 ): StemClassification {
   const combined = `${rawName} ${fileName}`.toLowerCase();
 
-  // 1. Background / Backing Vocals / Harmonies / Choir
+  if (
+    /\b(metronome|click|clicktrack|click[\s_-]?track|count[\s_-]?in|ticks?|beep)\b/i.test(
+      combined
+    ) ||
+    combined.includes('metronome') ||
+    combined.includes('click')
+  ) {
+    return {
+      id,
+      category: 'Other',
+      displayName: 'Metronome',
+      characterNote: 'Tempo click reference track',
+      source: 'filename',
+    };
+  }
+
   if (
     /\b(bgv|bv|b\.?vocals?|background|backing|harmon(y|ies)|choir|coros?|back\s*vox|ad\s*libs?|second\s*vocal|double\s*vox)\b/i.test(
       combined
@@ -342,11 +375,10 @@ export function classifyStemLocally(
       category: 'Background',
       displayName: 'Background Vocals',
       characterNote: 'Harmonic backing vocal layer',
-      source: 'heuristic',
+      source: 'filename',
     };
   }
 
-  // 2. Lead / Main Vocals
   if (
     /\b(lead\s*vocals?|main\s*vocals?|vocals?|vox|voice|voz|voces|singer|chant|gesang|acappella|acapella)\b/i.test(
       combined
@@ -360,11 +392,10 @@ export function classifyStemLocally(
       category: 'Vocals',
       displayName: combined.includes('lead') ? 'Lead Vocals' : 'Vocals',
       characterNote: 'Lead vocal melody track',
-      source: 'heuristic',
+      source: 'filename',
     };
   }
 
-  // 3. Drums & Percussion
   if (
     /\b(drums?|drumkit|kit|percussion|perc|bateria|batería|kick|snare|hi[\s-]?hat|cymbals?|toms?|beat|claps?|shaker|congas?|bongos?)\b/i.test(
       combined
@@ -382,11 +413,10 @@ export function classifyStemLocally(
       category: 'Drums',
       displayName: isPerc ? 'Percussion' : 'Drums',
       characterNote: isPerc ? 'Rhythmic percussion groove' : 'Punchy drum kit groove',
-      source: 'heuristic',
+      source: 'filename',
     };
   }
 
-  // 4. Bass
   if (
     /\b(bass|bassline|sub[\s-]?bass|808|bajo|baixo|basse|contrabass|upright\s*bass|synth\s*bass)\b/i.test(
       combined
@@ -400,11 +430,10 @@ export function classifyStemLocally(
       category: 'Bass',
       displayName: combined.includes('synth') ? 'Synth Bass' : 'Bass',
       characterNote: 'Warm low-end bassline',
-      source: 'heuristic',
+      source: 'filename',
     };
   }
 
-  // 5. Guitar
   if (
     /\b(guitars?|gtr|guitarra|ac[\s_-]?gtr|el[\s_-]?gtr|acoustic\s*guitar|electric\s*guitar|rhythm\s*guitar|lead\s*guitar|clean\s*guitar|distorted\s*guitar)\b/i.test(
       combined
@@ -422,11 +451,10 @@ export function classifyStemLocally(
       category: 'Guitar',
       displayName,
       characterNote: `${displayName} harmonic track`,
-      source: 'heuristic',
+      source: 'filename',
     };
   }
 
-  // 6. Keys / Piano / Organ
   if (
     /\b(keys|keyboards?|piano|pno|organ|rhodes|wurli|wurlitzer|clav|clavinet|teclado|epiano|electric\s*piano)\b/i.test(
       combined
@@ -446,11 +474,10 @@ export function classifyStemLocally(
       category: 'Keys',
       displayName,
       characterNote: `${displayName} chordal accompaniment`,
-      source: 'heuristic',
+      source: 'filename',
     };
   }
 
-  // 7. Synth / Strings / Pads / Brass
   if (
     /\b(synths?|synthesizer|pad|strings?|orchestra|brass|horns?|arp|arpeggio|lead\s*synth|pluck)\b/i.test(
       combined
@@ -469,11 +496,10 @@ export function classifyStemLocally(
       category: 'Synth',
       displayName,
       characterNote: `${displayName} texture layer`,
-      source: 'heuristic',
+      source: 'filename',
     };
   }
 
-  // 8. Pure Acoustic DSP Classification when filename is generic (e.g., "Track 1", "Audio 2")
   if (ap.lowEnergyRatio > 0.62 && ap.zeroCrossingRate < 500) {
     return {
       id,
@@ -533,10 +559,6 @@ export function classifyStemLocally(
   };
 }
 
-/**
- * Extracts a compact 1.6-second 8 kHz mono 16-bit WAV audio snippet from the most active window
- * of the AudioBuffer, encoded as Base64 (~25 KB) for fast mobile upload to Gemini.
- */
 export function extractAudioSnippetBase64(buffer: AudioBuffer): string {
   const ch0 = buffer.getChannelData(0);
   const sr = buffer.sampleRate || 44100;
@@ -546,7 +568,6 @@ export function extractAudioSnippetBase64(buffer: AudioBuffer): string {
   const windowSec = Math.min(1.6, buffer.duration);
   const windowSamples = Math.max(1, Math.floor(windowSec * sr));
 
-  // Find the loudest window across up to 8 candidate positions
   let bestStart = 0;
   let bestEnergy = -1;
   const steps = 8;
@@ -576,8 +597,8 @@ export function extractAudioSnippetBase64(buffer: AudioBuffer): string {
   writeAscii(view, 8, 'WAVE');
   writeAscii(view, 12, 'fmt ');
   view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true); // PCM
-  view.setUint16(22, 1, true); // Mono
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
   view.setUint32(24, targetSr, true);
   view.setUint32(28, targetSr * 2, true);
   view.setUint16(32, 2, true);
@@ -601,10 +622,6 @@ export function extractAudioSnippetBase64(buffer: AudioBuffer): string {
   return btoa(binary);
 }
 
-/**
- * Calls the server-side Gemini endpoint (/api/classify-stems) with automatic retry,
- * timeout protection, and seamless offline/heuristic fallback so classification never fails.
- */
 export async function classifyStemsWithAI(stems: Stem[]): Promise<StemClassification[]> {
   if (stems.length === 0) return [];
 
@@ -628,7 +645,6 @@ export async function classifyStemsWithAI(stems: Stem[]): Promise<StemClassifica
     })),
   });
 
-  // Try with audio snippets first (up to 6 stems); for larger batches or retry, omit audio snippets for speed on mobile
   const shouldIncludeSnippets = stems.length <= 6;
 
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -652,7 +668,6 @@ export async function classifyStemsWithAI(stems: Stem[]): Promise<StemClassifica
       }
     } catch {
       clearTimeout(timeoutId);
-      // Wait briefly before retry
       if (attempt === 0) {
         await new Promise((r) => setTimeout(r, 400));
       }
@@ -669,8 +684,8 @@ export interface RawAudioCandidate {
 }
 
 /**
- * Unpacks selected files (including .zip archives from Moises, iOS Files, or Android Downloads)
- * into raw audio candidates and collects descriptive user-facing errors.
+ * Extremely robust file and ZIP extractor designed specifically for iOS Safari (Files/iCloud)
+ * and Android Chrome (Downloads/Drive). Accepts any audio extension or MIME type.
  */
 export async function extractAudioCandidates(
   fileList: FileList | File[]
@@ -685,13 +700,18 @@ export async function extractAudioCandidates(
 
     const isZip =
       ext === 'zip' ||
-      mime === 'application/zip' ||
-      mime === 'application/x-zip-compressed' ||
-      mime === 'multipart/x-zip';
+      mime.includes('zip') ||
+      mime.includes('compressed') ||
+      mime.includes('octet-stream');
 
-    if (isZip) {
+    // On iOS Safari, ZIP files from iCloud Drive can sometimes have empty or octet-stream MIME types,
+    // so we attempt to load them with JSZip first; if JSZip succeeds, it's a valid ZIP archive!
+    let successfullyLoadedAsZip = false;
+
+    if (isZip || ext === 'zip' || !ext) {
       try {
-        const zip = await JSZip.loadAsync(file);
+        const arrayBuf = await readFileAsArrayBuffer(file);
+        const zip = await JSZip.loadAsync(arrayBuf);
         let foundAudioInZip = 0;
 
         const entries = Object.values(zip.files);
@@ -708,25 +728,23 @@ export async function extractAudioCandidates(
           });
         }
 
-        if (foundAudioInZip === 0) {
-          errors.push({
-            id: `${Date.now()}-${Math.random()}`,
-            fileName: file.name,
-            message: `No supported audio files found inside "${file.name}". Ensure the ZIP archive contains MP3, WAV, M4A, AAC, FLAC or OGG stems.`,
-          });
+        if (foundAudioInZip > 0) {
+          successfullyLoadedAsZip = true;
         }
       } catch {
-        errors.push({
-          id: `${Date.now()}-${Math.random()}`,
-          fileName: file.name,
-          message: `Could not unpack "${file.name}". Ensure it is a valid ZIP archive.`,
-        });
+        // Not a zip archive; fall through to audio file check
       }
-    } else if (isSupportedAudioFile(file.name, file.type)) {
+    }
+
+    if (successfullyLoadedAsZip) {
+      continue;
+    }
+
+    if (isSupportedAudioFile(file.name, file.type) || ext) {
       candidates.push({
         fileName: file.name,
         stemName: stripExtension(file.name),
-        getArrayBuffer: () => file.arrayBuffer(),
+        getArrayBuffer: () => readFileAsArrayBuffer(file),
       });
     } else {
       errors.push({
@@ -760,9 +778,6 @@ export function getEffectiveStemGain(stem: Stem, anySoloed: boolean): number {
   return isStemAudible(stem, anySoloed) ? stem.volume : 0;
 }
 
-/**
- * Produces a concise, readable stem token for filenames (e.g., "b.vocals", "vocals", "drums", "bass", "keys").
- */
 export function getCompactStemToken(stem: Stem): string {
   const combined = `${stem.name} ${stem.rawName}`.toLowerCase();
 
@@ -840,15 +855,10 @@ export function getCompactStemToken(stem: Stem): string {
   return cleaned || 'stem';
 }
 
-/**
- * Builds an intelligent export filename containing the current stem mix settings,
- * placing modified stem percentages first (e.g., "b.vocals10%_vocals100%_drums100%_bass100%.wav").
- */
 export function buildMixdownFilename(stems: Stem[]): string {
   if (stems.length === 0) return 'mixdown.wav';
 
   const anySoloed = stems.some((s) => s.soloed);
-
   const rawTokens = stems.map((s) => getCompactStemToken(s));
   const counts = new Map<string, number>();
   for (const t of rawTokens) {
@@ -902,9 +912,6 @@ export function buildMixdownFilename(stems: Stem[]): string {
   return `${baseName}.wav`;
 }
 
-/**
- * Checks whether the current mobile browser (iOS Safari / Android Chrome) supports native file sharing.
- */
 export function canShareAudioFile(): boolean {
   try {
     if (typeof navigator === 'undefined' || typeof navigator.canShare !== 'function') {
@@ -917,10 +924,6 @@ export function canShareAudioFile(): boolean {
   }
 }
 
-/**
- * Triggers native iOS / Android Share Sheet ("Save to Files", AirDrop, Messages, Drive)
- * for a rendered WAV mixdown blob.
- */
 export async function shareAudioBlob(blob: Blob, fileName: string): Promise<boolean> {
   try {
     if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
@@ -936,15 +939,12 @@ export async function shareAudioBlob(blob: Blob, fileName: string): Promise<bool
     }
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
-      return true; // User dismissed share sheet intentionally
+      return true;
     }
   }
   return false;
 }
 
-/**
- * Downloads a Blob to the user's device with mobile Safari / Android compatibility.
- */
 export function triggerBlobDownload(blob: Blob, fileName: string): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -1045,6 +1045,49 @@ export async function exportMixdownWav(
   };
 }
 
+export function encodeAudioBufferToWav(buffer: AudioBuffer): ArrayBuffer {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const numFrames = buffer.length;
+  
+  const left = buffer.getChannelData(0);
+  const right = numChannels > 1 ? buffer.getChannelData(1) : left;
+
+  const bytesPerSample = 2;
+  const blockAlign = 2 * bytesPerSample;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = numFrames * blockAlign;
+  const outBuffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(outBuffer);
+
+  writeAscii(view, 0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeAscii(view, 8, 'WAVE');
+  writeAscii(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 2, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeAscii(view, 36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  let offset = 44;
+  for (let i = 0; i < numFrames; i++) {
+    const sampleL = Math.max(-1, Math.min(1, left[i]));
+    const sampleR = Math.max(-1, Math.min(1, right[i]));
+
+    view.setInt16(offset, sampleL < 0 ? sampleL * 0x8000 : sampleL * 0x7fff, true);
+    offset += 2;
+    view.setInt16(offset, sampleR < 0 ? sampleR * 0x8000 : sampleR * 0x7fff, true);
+    offset += 2;
+  }
+
+  return outBuffer;
+}
+
 function encodeStereoPcm16Wav(
   left: Float32Array,
   right: Float32Array,
@@ -1094,10 +1137,6 @@ function writeAscii(view: DataView, offset: number, text: string): void {
   }
 }
 
-/**
- * Generates a realistic 4-stem multitrack session (Vocals, Background Vocals, Drums, Bass)
- * with instant initial classification so users can test AI stem recognition, playback, and WAV export.
- */
 export function createDemoStems(ctx: AudioContext, existingCount = 0): Stem[] {
   const sampleRate = ctx.sampleRate || 44100;
   const bpm = 110;
@@ -1108,7 +1147,6 @@ export function createDemoStems(ctx: AudioContext, existingCount = 0): Stem[] {
   const duration = totalBeats * beatDuration;
   const length = Math.floor(duration * sampleRate);
 
-  // 1. Vocals (Lead vocal melody)
   const leadBuffer = ctx.createBuffer(2, length, sampleRate);
   const leadL = leadBuffer.getChannelData(0);
   const leadR = leadBuffer.getChannelData(1);
@@ -1150,15 +1188,14 @@ export function createDemoStems(ctx: AudioContext, existingCount = 0): Stem[] {
     }
   }
 
-  // 2. Background (Harmonic backing choir / chords: Am7 - Fmaj7 - Cmaj7 - G6)
   const bgBuffer = ctx.createBuffer(2, length, sampleRate);
   const bgL = bgBuffer.getChannelData(0);
   const bgR = bgBuffer.getChannelData(1);
   const chords = [
-    [220.0, 261.63, 329.63, 392.0], // Am7
-    [174.61, 220.0, 261.63, 329.63], // Fmaj7
-    [261.63, 329.63, 392.0, 493.88], // Cmaj7
-    [196.0, 246.94, 293.66, 329.63], // G6
+    [220.0, 261.63, 329.63, 392.0],
+    [174.61, 220.0, 261.63, 329.63],
+    [261.63, 329.63, 392.0, 493.88],
+    [196.0, 246.94, 293.66, 329.63],
   ];
 
   for (let bar = 0; bar < bars; bar++) {
@@ -1188,7 +1225,6 @@ export function createDemoStems(ctx: AudioContext, existingCount = 0): Stem[] {
     }
   }
 
-  // 3. Drums Stem (Kick, Snare, Hi-Hat groove)
   const drumsBuffer = ctx.createBuffer(2, length, sampleRate);
   const drumsL = drumsBuffer.getChannelData(0);
   const drumsR = drumsBuffer.getChannelData(1);
@@ -1233,7 +1269,6 @@ export function createDemoStems(ctx: AudioContext, existingCount = 0): Stem[] {
     }
   }
 
-  // 4. Bass Stem (Warm sub + harmonic bassline)
   const bassBuffer = ctx.createBuffer(2, length, sampleRate);
   const bassL = bassBuffer.getChannelData(0);
   const bassR = bassBuffer.getChannelData(1);
@@ -1301,5 +1336,48 @@ export function createDemoStems(ctx: AudioContext, existingCount = 0): Stem[] {
       isClassifying: true,
       acousticProfile,
     };
+  });
+}
+
+const CATEGORY_ORDER: Record<StemCategory, number> = {
+  Vocals: 1,
+  Background: 2,
+  Guitar: 3,
+  Keys: 4,
+  Synth: 5,
+  Bass: 6,
+  Drums: 7,
+  Other: 8,
+};
+
+export function sortStems(stems: Stem[]): Stem[] {
+  return [...stems].sort((a, b) => {
+    const aIsMetronome =
+      a.name.toLowerCase().includes('metronome') ||
+      a.fileName.toLowerCase().includes('metronome') ||
+      a.fileName.toLowerCase().includes('click');
+    const bIsMetronome =
+      b.name.toLowerCase().includes('metronome') ||
+      b.fileName.toLowerCase().includes('metronome') ||
+      b.fileName.toLowerCase().includes('click');
+    if (aIsMetronome && !bIsMetronome) return 1;
+    if (!aIsMetronome && bIsMetronome) return -1;
+
+    const catA = a.category || 'Other';
+    const catB = b.category || 'Other';
+    const orderA = CATEGORY_ORDER[catA] ?? 9;
+    const orderB = CATEGORY_ORDER[catB] ?? 9;
+    if (orderA !== orderB) return orderA - orderB;
+
+    const nameA = a.name.toLowerCase();
+    const nameB = b.name.toLowerCase();
+    if (catA === 'Guitar') {
+      const aIsAc = nameA.includes('acoustic');
+      const bIsAc = nameB.includes('acoustic');
+      if (!aIsAc && bIsAc) return -1;
+      if (aIsAc && !bIsAc) return 1;
+    }
+
+    return 0;
   });
 }
